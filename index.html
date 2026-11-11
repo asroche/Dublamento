@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Dublamento</title>
+<meta name="description" content="Estúdio de dublagem de cenas e memes famosos, fala por fala, no celular.">
+<meta name="theme-color" content="#0d0d14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Dublamento">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="logo" href="#/"><span class="logo-mark">🎙️</span><span>Dub<b>lamento</b></span></a>
+  <nav class="nav">
+    <a href="#/" data-page="cenas"><span>🎬</span>Cenas</a>
+    <a href="#/projetos" data-page="projetos"><span>📁</span>Projetos</a>
+    <a href="#/adicionar" data-page="adicionar"><span>➕</span>Adicionar</a>
+    <a href="#/sobre" data-page="sobre"><span>ℹ️</span>Ajuda</a>
+  </nav>
+  <button id="installBtn" class="btn sm" hidden>Instalar app</button>
+</header>
+<main id="app"><p class="muted" style="padding:24px">Carregando…</p></main>
+<noscript>O Dublamento precisa de JavaScript.</noscript>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
