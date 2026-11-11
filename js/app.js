@@ -70,7 +70,7 @@ function renderLibrary() {
   app.append(
     location.protocol === 'file:' ? h('div', { class: 'banner' }, h('span', {}, '⚠️ Você abriu o arquivo direto do aparelho. O visual e os vídeos próprios funcionam, mas o YouTube e o microfone podem ser bloqueados assim. Para usar tudo, abra pelo link https do Dublamento.')) : null,
     h('section', { class: 'hero' },
-      h('div', {}, h('h1', {}, 'Escolha uma cena e ', h('span', { class: 'grad' }, 'solte a voz')), h('p', { class: 'muted' }, `${allScenes().length} cenas e memes famosos, fala por fala, com créditos dos vídeos originais.`)),
+      h('div', {}, h('h1', {}, 'Escolha uma cena e ', h('span', { class: 'grad' }, 'solte a voz')), h('p', { class: 'muted' }, `${allScenes().length} cenas e memes famosos do YouTube, com créditos dos vídeos originais. Marque as falas uma vez e duble fala por fala.`)),
       h('div', { class: 'row' }, h('button', { class: 'btn', onclick: random }, '🎲 Cena aleatória'), h('a', { class: 'btn primary', href: '#/adicionar' }, '+ Adicionar cena'))),
     h('div', { class: 'lib-tools' }, search, chips), grid);
   fill();
@@ -81,7 +81,7 @@ function card(s) {
   return h('article', { class: 'card', tabindex: 0, onclick: () => openScene(s), onkeydown: e => e.key === 'Enter' && openScene(s) },
     h('div', { class: 'thumb' }, thumbOf(s) ? h('img', { src: thumbOf(s), alt: '', loading: 'lazy', onerror: imgErr }) : h('div', { class: 'noimg' }, '🎬'),
       h('span', { class: 'dur' }, fmtTime(sceneDur(s))), h('span', { class: 'cat' }, s.cat), fav),
-    h('div', { class: 'card-body' }, h('h3', {}, s.title), h('p', { class: 'small muted' }, (s.kind === 'local' ? '📱 ' : '▶ ') + (s.credit?.channel || (s.kind === 'local' ? 'Vídeo próprio' : 'YouTube')) + ` · ${(s.lines || []).length} falas`)));
+    h('div', { class: 'card-body' }, h('h3', {}, s.title), h('p', { class: 'small muted' }, (s.kind === 'local' ? '📱 ' : '▶ ') + (s.credit?.channel || (s.kind === 'local' ? 'Vídeo próprio' : 'YouTube')) + ((s.lines || []).length ? ` · ${s.lines.length} falas` : ''))));
 }
 async function toggleFav(id) { favs.has(id) ? favs.delete(id) : favs.add(id); await kv.set('favs', [...favs]); }
 
@@ -106,9 +106,10 @@ function openScene(s) {
     h('div', { class: 'row wrap' }, h('button', { class: 'btn primary big', onclick: async () => { close(); await startProject(s); } }, '🎙️ Dublar esta cena'), fav,
       s.custom ? h('button', { class: 'btn danger', onclick: async () => { if (!confirm('Apagar esta cena da sua biblioteca? Os projetos já criados continuam.')) return; await db.del('scenes', s.id); customScenes = customScenes.filter(x => x.id !== s.id); close(); renderLibrary(); } }, '🗑 Apagar cena') : null),
     credit,
-    h('h4', {}, `Roteiro (${(s.lines || []).length} falas)`),
+    h('h4', {}, 'Falas'),
+    (s.lines || []).length ? null : h('p', { class: 'small' }, 'Na primeira vez você marca as falas reais do vídeo: assiste e segura um botão enquanto o personagem fala, depois digita o texto. Fica salvo para as próximas dublagens desta cena.'),
     h('ol', { class: 'script' }, (s.lines || []).map(l => h('li', {}, l.c ? h('span', { class: 'who', style: { background: charColor(l.c) } }, l.c) : null, ' ', l.t, l.o ? h('span', { class: 'muted small' }, ` — “${l.o}”`) : null))),
-    h('p', { class: 'small muted' }, s.custom ? '' : 'Roteiro sugerido em português. Dá para reescrever tudo no Editor de cena.'),
+
   ]);
 }
 
@@ -117,11 +118,11 @@ async function startProject(s) {
   let lines = (override || s.lines || []).map(l => ({ ...l, id: l.id || uid('ln_') }));
   const dur = sceneDur(s);
   const timed = !!override || (lines.length > 0 && lines.every(l => typeof l.s === 'number' && typeof l.e === 'number'));
-  if (!timed) lines = autoTime(lines, dur);
+  if (!timed && lines.length) lines = autoTime(lines, dur);
   const p = {
     id: uid('pj_'), name: s.title, sceneId: s.id,
     scene: { kind: s.kind === 'local' ? 'local' : 'yt', yt: s.yt, start: s.start || 0, end: s.end || 0, blobKey: s.blobKey, credit: s.credit || {}, custom: !!s.custom, title: s.title },
-    duration: dur, lines, approx: !timed, timed, takes: [], sfx: [], music: 'none',
+    duration: dur, lines, approx: false, timed: true, takes: [], sfx: [], music: 'none',
     mix: { orig: 0.25, voice: 1, sfx: 0.8, music: 0.35, master: 1 },
     thumb: s.kind === 'local' ? s.thumb : ytThumb(s.yt), createdAt: Date.now(), updatedAt: Date.now(),
   };

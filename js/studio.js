@@ -2,7 +2,7 @@
 import { $, $$, h, uid, clamp, fmtTime, toast, debounce, escapeHtml, parseSubtitles, toSRT, downloadBlob, slug } from './util.js';
 import { db, kv } from './db.js';
 import { YouTubePlayer, LocalPlayer } from './player.js';
-import { getCtx, resumeCtx, outLatency, Mic, encodeWAV, decodeBlob, EFFECTS, effectById, applyEffect, clearFxCache, SFX, sfxBuffer, MUSIC, musicBuffer, scheduleMix, peaks, autoGain } from './audio.js';
+import { getCtx, resumeCtx, outLatency, Mic, encodeWAV, decodeBlob, EFFECTS, effectById, applyEffect, clearFxCache, SFX, sfxBuffer, MUSIC, musicBuffer, scheduleMix, peaks, autoGain, scoreTake, removeVoice } from './audio.js';
 import { ytUrl, autoTime } from './scenes.js';
 import { openExport } from './export.js';
 
@@ -74,8 +74,8 @@ export async function openStudio(root, projectId, { onExit }) {
     h('button', { class: 'chip', onclick: () => setZoom(S.pps / 1.5) }, '−'),
     h('button', { class: 'chip', onclick: () => setZoom(S.pps * 1.5) }, '+'));
   const approxBanner = h('div', { class: 'banner', hidden: true },
-    h('span', {}, '⏱ Os tempos das falas desta cena são aproximados. Ajuste uma vez no Editor e fica salvo.'),
-    h('button', { class: 'btn sm', onclick: () => setTab('editor') }, 'Ajustar'));
+    h('span', {}, '✍️ Esta cena ainda não tem falas. Marque as falas reais do vídeo uma vez e elas ficam salvas.'),
+    h('button', { class: 'btn sm', onclick: () => { setTab('editor'); startTap(true); } }, 'Marcar falas'));
   const TABS = [['roteiro', '📜 Roteiro'], ['gravar', '🎙️ Gravar'], ['takes', '🎚️ Takes'], ['efeitos', '✨ Efeitos'], ['sons', '🔊 Sons'], ['mixer', '🎛️ Mixer'], ['sync', '⏱ Sincronia'], ['editor', '✂️ Editor de cena']];
   const tabBar = h('div', { class: 'tabs', role: 'tablist' }, TABS.map(([id, label]) => h('button', { class: 'tab', 'data-tab': id, role: 'tab', onclick: () => setTab(id) }, label)));
   const panel = h('div', { class: 'panel' });
@@ -114,6 +114,13 @@ export async function openStudio(root, projectId, { onExit }) {
 
   /* ---------- Utilidades de falas/takes ---------- */
   const lineById = id => project.lines.find(l => l.id === id);
+  const chars = () => [...new Set(project.lines.map(l => l.c).filter(Boolean))];
+  const roleLines = () => project.role ? project.lines.filter(l => l.c === project.role) : project.lines;
+  function sceneScore() {
+    const ls = roleLines(); if (!ls.length) return 0;
+    const sum = ls.reduce((a, l) => a + (activeTake(l.id)?.score ?? 0), 0);
+    return Math.round(sum / ls.length) / 10;
+  }
   const sortLines = () => project.lines.sort((a, b) => a.s - b.s);
   const activeTake = lineId => project.takes.find(t => t.lineId === lineId && t.active);
   const takesOf = lineId => project.takes.filter(t => t.lineId === lineId);
@@ -124,6 +131,7 @@ export async function openStudio(root, projectId, { onExit }) {
       if (!tk.active && opts.solo !== tk.id) continue;
       const l = lineById(tk.lineId); if (!l) continue;
       if (opts.skipLine && l.id === opts.skipLine) continue;
+      if (opts.skipRole && l.c === opts.skipRole) continue;
       if (opts.noVoice) continue;
       const nud = (tk.nudge || 0) / 1000;
       takes.push({ id: tk.id, gain: tk.gain ?? 1, start: l.s + nud, maxDur: (l.e - l.s) + Math.max(0, -nud) });
@@ -263,7 +271,7 @@ export async function openStudio(root, projectId, { onExit }) {
     if (!l) { if (subLine) { subEl.innerHTML = ''; subLine = null; } subEl.classList.remove('show'); return; }
     if (subLine !== l.id + '|' + l.t + '|' + l.c) {
       subLine = l.id + '|' + l.t + '|' + l.c;
-      const words = String(l.t).split(/\s+/).filter(Boolean);
+      const words = String(l.t || '🎙️').split(/\s+/).filter(Boolean);
       subEl.innerHTML = '';
       if (l.c) subEl.append(h('span', { class: 'who', style: { background: charColor(l.c) } }, l.c));
       const tx = h('div', { class: 'words' }, words.map(w => h('span', { class: 'w' }, w + ' ')));
@@ -290,8 +298,8 @@ export async function openStudio(root, projectId, { onExit }) {
     sortLines();
     let lines;
     if (mode === 'line') { const l = lineById(S.selLine); if (!l) return toast('Selecione uma fala no roteiro.', 'err'); lines = [l]; }
-    else if (mode === 'pending') { lines = project.lines.filter(l => !activeTake(l.id)); if (!lines.length) return toast('Todas as falas já têm take. 🎉'); }
-    else lines = [...project.lines];
+    else if (mode === 'pending') { lines = roleLines().filter(l => !activeTake(l.id)); if (!lines.length) return toast('Todas as falas já têm take. 🎉'); }
+    else lines = [...roleLines()];
     if (!lines.length) return toast('Esta cena não tem falas. Adicione no Editor de cena.', 'err');
     try { await mic.init({ echo: settings.echo, noise: settings.noise }); }
     catch (e) { return toast(e.name === 'NotAllowedError' ? 'Permissão do microfone negada. Libere nas configurações do navegador.' : (e.message || 'Microfone indisponível'), 'err'); }
@@ -308,7 +316,7 @@ export async function openStudio(root, projectId, { onExit }) {
       if (S.destroyed) return;
     }
     countEl.classList.remove('show', 'pop');
-    const mixOpts = mode === 'line' && settings.recOthers ? { skipLine: lines[0].id } : { noVoice: true };
+    const mixOpts = mode === 'line' && settings.recOthers ? { skipLine: lines[0].id } : project.role && settings.recOthers ? { skipRole: project.role } : { noVoice: true };
     S.recording = { lines, pairs: [], stalled: false, stopAt, capStart: 0, mode };
     applyMixLive();
     const ok = await play(from, { end: stopAt, mix: mixOpts, onEnd: () => {} });
@@ -371,7 +379,7 @@ export async function openStudio(root, projectId, { onExit }) {
       await db.put('blobs', encodeWAV(buf), blobKey);
       takesOf(l.id).forEach(t => (t.active = false));
       const prevFx = project.lastFx || 'normal';
-      const tk = { id, lineId: l.id, active: true, blobKey, nudge: 0, fx: prevFx, pitch: 0, gain: 1, createdAt: Date.now(), n: takesOf(l.id).length + 1, warn: R.stalled };
+      const tk = { id, lineId: l.id, active: true, blobKey, nudge: 0, fx: prevFx, pitch: 0, gain: 1, createdAt: Date.now(), n: takesOf(l.id).length + 1, warn: R.stalled, score: scoreTake(buf) };
       project.takes.push(tk);
       assets.raw.set(id, buf);
       await processTake(tk);
@@ -382,6 +390,21 @@ export async function openStudio(root, projectId, { onExit }) {
     if (made) toast(`${made} take${made > 1 ? 's' : ''} gravado${made > 1 ? 's' : ''}${R.stalled ? ' (a conexão travou: confira a sincronia)' : ''} ✓`, R.stalled ? 'warn' : 'ok');
     else toast(aborted ? 'Gravação interrompida antes do fim da fala. Nada foi salvo.' : 'Nenhuma fala completa foi gravada.', 'err');
     renderPanel(); drawTL();
+    if (made && (R.mode === 'all' || R.mode === 'pending')) showScore();
+    else if (made === 1) { const t = project.takes[project.takes.length - 1]; toast(`Nota do take: ${(t.score / 10).toFixed(1).replace('.', ',')} ${t.score >= 80 ? '🔥' : t.score >= 50 ? '👍' : '— tente de novo ocupando a fala toda'}`, t.score >= 50 ? 'ok' : 'warn'); }
+  }
+
+  function showScore() {
+    const nota = sceneScore();
+    const ls = roleLines();
+    const m = h('div', { class: 'modal', onclick: e => { if (e.target === m) m.remove(); } }, h('div', { class: 'sheet score-sheet' },
+      h('div', { class: 'sheet-head' }, h('h3', {}, 'Sua nota'), h('button', { class: 'iconbtn', onclick: () => m.remove() }, '✕')),
+      h('div', { class: 'score-big' }, nota.toFixed(1).replace('.', ',')),
+      h('p', { class: 'muted', style: { textAlign: 'center' } }, nota >= 8 ? 'Dublagem de estúdio! 🔥' : nota >= 6 ? 'Mandou bem! Dá pra lapidar algumas falas.' : 'Bom começo! Regrave as falas com nota baixa.'),
+      h('ol', { class: 'score-list' }, ls.map(l => { const t = activeTake(l.id); const sc = t?.score ?? 0; return h('li', {}, h('span', {}, l.t), h('b', { class: sc >= 80 ? 'ok' : sc >= 50 ? '' : 'bad' }, t ? (sc / 10).toFixed(1).replace('.', ',') : '—')); })),
+      h('p', { class: 'small muted' }, 'A nota mede se a sua voz ocupou a janela de cada fala: começou no tempo, preencheu a fala e terminou junto.'),
+      h('div', { class: 'row wrap' }, h('button', { class: 'btn primary', onclick: () => { m.remove(); play(0); } }, '▶ Assistir minha dublagem'), h('button', { class: 'btn', onclick: () => { m.remove(); doExport(); } }, '⬇ Exportar'))));
+    document.body.append(m);
   }
 
   /* ---------- Timeline ---------- */
@@ -428,7 +451,8 @@ export async function openStudio(root, projectId, { onExit }) {
       const col = charColor(l.c);
       const sel = l.id === S.selLine;
       const rec = S.recording && S.recording.lines.includes(l);
-      g.fillStyle = col + (sel ? 'cc' : '55');
+      const other = project.role && l.c !== project.role;
+      g.fillStyle = col + (sel ? 'cc' : other ? '22' : '55');
       roundRect(g, x0, y1 + 3, w, TL.lines - 6, 5); g.fill();
       if (sel) { g.strokeStyle = '#fff'; g.lineWidth = 1.5; g.stroke(); }
       if (rec) { g.strokeStyle = '#ff3b3b'; g.lineWidth = 2; g.stroke(); }
@@ -572,23 +596,27 @@ export async function openStudio(root, projectId, { onExit }) {
 
   function pRoteiro() {
     sortLines();
-    const done = project.lines.filter(l => activeTake(l.id)).length;
+    const done = roleLines().filter(l => activeTake(l.id)).length;
+    const cs = chars();
     return h('div', {},
+      cs.length > 1 ? h('div', { class: 'role-pick' }, h('span', { class: 'small muted' }, 'Quem você vai dublar?'),
+        h('div', { class: 'chips' }, [null, ...cs].map(c => h('button', { class: 'chip' + ((project.role || null) === c ? ' on' : ''), onclick: () => { project.role = c; save(); renderPanel(); drawTL(); } }, c || 'Todos os personagens')))) : null,
       h('div', { class: 'row between' },
-        h('div', {}, h('b', {}, `${project.lines.length} falas`), h('span', { class: 'muted' }, ` · ${done} gravadas`)),
+        h('div', {}, h('b', {}, `${roleLines().length} falas${project.role ? ' de ' + project.role : ''}`), h('span', { class: 'muted' }, ` · ${done} gravadas`), done ? h('span', { class: 'nota-chip', onclick: showScore }, '⭐ ' + sceneScore().toFixed(1).replace('.', ',')) : null),
         h('div', { class: 'row' },
           h('button', { class: 'btn sm', onclick: () => setTab('editor') }, '✂️ Editar cena'),
           h('button', { class: 'btn sm rec', onclick: () => { setTab('gravar'); } }, '🎙️ Gravar'))),
-      h('div', { class: 'progress' }, h('i', { style: { width: (done / Math.max(1, project.lines.length) * 100) + '%' } })),
+      h('div', { class: 'progress' }, h('i', { style: { width: (done / Math.max(1, roleLines().length) * 100) + '%' } })),
+      project.lines.length ? null : h('div', { class: 'empty-state' }, h('p', {}, 'Esta cena ainda não tem falas.'), h('button', { class: 'btn primary', onclick: () => { setTab('editor'); startTap(true); } }, '➕ Marcar as falas do vídeo')),
       h('ol', { class: 'lines' }, project.lines.map((l, i) => {
         const tk = activeTake(l.id);
-        return h('li', { class: 'line' + (l.id === S.selLine ? ' sel' : ''), onclick: () => selectLine(l.id, true) },
+        return h('li', { class: 'line' + (l.id === S.selLine ? ' sel' : '') + (project.role && l.c !== project.role ? ' other' : ''), onclick: () => selectLine(l.id, true) },
           h('div', { class: 'line-head' },
             h('span', { class: 'num' }, i + 1),
             l.c ? h('span', { class: 'who', style: { background: charColor(l.c) } }, l.c) : null,
             h('span', { class: 'time' }, lineLabel(l)),
-            h('span', { class: 'status ' + (tk ? 'ok' : '') }, tk ? '✓ gravada' : 'pendente')),
-          h('div', { class: 'line-text' }, l.t),
+            h('span', { class: 'status ' + (tk ? 'ok' : '') }, tk ? `✓ nota ${((tk.score ?? 0) / 10).toFixed(1).replace('.', ',')}` : 'pendente')),
+          h('div', { class: 'line-text' + (l.t ? '' : ' muted') }, l.t || '(sem texto — digite no Editor de cena)'),
           l.o ? h('div', { class: 'line-orig' }, '“' + l.o + '”') : null,
           h('div', { class: 'line-actions', onclick: e => e.stopPropagation() },
             h('button', { class: 'btn sm', title: 'Ver a cena nesta fala', onclick: () => playLine(l.id) }, '▶ Cena'),
@@ -603,14 +631,14 @@ export async function openStudio(root, projectId, { onExit }) {
     const l = lineById(S.selLine);
     const opt = (k, vals, label) => h('div', { class: 'field' }, h('label', {}, label), h('div', { class: 'seg' }, vals.map(([v, t]) => h('button', { class: settings[k] === v ? 'on' : '', onclick: () => { setSetting(k, v); renderPanel(); } }, t))));
     const tog = (k, label, extra) => h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: !!settings[k], onchange: e => { setSetting(k, e.target.checked); extra && extra(); } }), h('span', {}, label));
-    const pending = project.lines.filter(x => !activeTake(x.id)).length;
+    const pending = roleLines().filter(x => !activeTake(x.id)).length;
     return h('div', {},
       h('div', { class: 'rec-card' },
         h('div', { class: 'muted small' }, 'Fala selecionada'),
         l ? h('div', {}, h('b', {}, l.c ? l.c + ': ' : ''), l.t, h('div', { class: 'muted small' }, 'Janela do take: ' + lineLabel(l) + ' — a gravação para sozinha no fim.')) : h('div', { class: 'muted' }, 'Nenhuma'),
         h('div', { class: 'rec-buttons' },
           h('button', { class: 'bigrec', onclick: () => record('line') }, h('span', { class: 'dot' }), S.recording ? 'Parar' : 'Gravar esta fala'),
-          h('button', { class: 'btn', onclick: () => record('all') }, '🎬 Gravar a cena inteira'),
+          h('button', { class: 'btn', onclick: () => record('all') }, project.role ? `🎬 Gravar todas as falas de ${project.role}` : '🎬 Gravar a cena inteira'),
           h('button', { class: 'btn', disabled: !pending, onclick: () => record('pending') }, `⏭ Só as pendentes (${pending})`)),
         h('div', { class: 'meter', title: 'Nível do microfone' }, h('i')),
         mic.ready ? null : h('button', { class: 'btn sm', onclick: async () => { try { await mic.init({ echo: settings.echo, noise: settings.noise }); toast('Microfone pronto 🎙️', 'ok'); renderPanel(); } catch (e) { toast(e.message || 'Microfone indisponível', 'err'); } } }, 'Testar microfone')),
@@ -640,7 +668,7 @@ export async function openStudio(root, projectId, { onExit }) {
         h('div', { class: 'row between' }, h('div', {}, l.c ? h('span', { class: 'who', style: { background: charColor(l.c) } }, l.c) : null, ' ', h('span', { class: 'small' }, l.t)), h('span', { class: 'muted small' }, fmtD(l.e - l.s))),
         takesOf(l.id).map((tk, i) => h('div', { class: 'take' + (tk.active ? ' active' : '') + (tk.id === S.selTake ? ' sel' : '') },
           h('label', { class: 'radio' }, h('input', { type: 'radio', name: 'act-' + l.id, checked: tk.active, onchange: () => { takesOf(l.id).forEach(t => (t.active = false)); tk.active = true; S.selTake = tk.id; save(); renderPanel(); } }), `Take ${i + 1}`),
-          h('span', { class: 'muted small' }, effectById(tk.fx).icon + ' ' + effectById(tk.fx).name + (tk.nudge ? ` · ${tk.nudge > 0 ? '+' : ''}${tk.nudge} ms` : '') + (tk.warn ? ' · ⚠' : '')),
+          h('span', { class: 'muted small' }, (tk.score != null ? `⭐ ${(tk.score / 10).toFixed(1).replace('.', ',')} · ` : '') + effectById(tk.fx).icon + ' ' + effectById(tk.fx).name + (tk.nudge ? ` · ${tk.nudge > 0 ? '+' : ''}${tk.nudge} ms` : '') + (tk.warn ? ' · ⚠' : '')),
           h('div', { class: 'row' },
             h('button', { class: 'btn sm', title: 'Ouvir sozinho', onclick: () => soloTake(tk) }, '🎧'),
             h('button', { class: 'btn sm', title: 'Ouvir com a cena', onclick: () => { S.selTake = tk.id; playLine(l.id, { mix: { solo: tk.active ? undefined : tk.id } }); } }, '▶'),
@@ -714,7 +742,11 @@ export async function openStudio(root, projectId, { onExit }) {
       h('div', { class: 'row' },
         h('button', { class: 'btn sm', onclick: () => { project.mix.orig = 0; applyMixLive(); save(); renderPanel(); } }, '🔇 Original mudo'),
         h('button', { class: 'btn sm', onclick: () => { project.mix.orig = 0.12; applyMixLive(); save(); renderPanel(); } }, 'Original de fundo')),
-      sc.kind === 'yt' ? h('p', { class: 'muted small' }, 'No iPhone o YouTube só permite ligar ou desligar o som original. No Android e no computador o volume é gradual.') : null);
+      sc.kind === 'local' ? h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: !!project.removeVoice, onchange: async e => {
+        project.removeVoice = e.target.checked; save();
+        if (assets.origRaw) { msgEl.textContent = 'Processando áudio…'; msgEl.classList.add('show'); assets.original = project.removeVoice ? await removeVoice(assets.origRaw) : assets.origRaw; origPeaks = null; msgEl.classList.remove('show'); drawTL(); if (S.playing) startMix(); }
+      } }), h('span', {}, 'Tirar a voz original e manter música/efeitos (aproximado; funciona melhor em vídeos estéreo)')) : null,
+      sc.kind === 'yt' ? h('p', { class: 'muted small' }, 'Vídeos do YouTube não permitem separar a voz da música: use o volume do original no mínimo ao dublar. No iPhone o YouTube só permite ligar ou desligar o som original. No Android e no computador o volume é gradual.') : null);
   }
 
   function pSync() {
@@ -753,22 +785,41 @@ export async function openStudio(root, projectId, { onExit }) {
   /* ---------- Editor de cena ---------- */
   function pushUndo() { S.undo.push(JSON.stringify(project.lines)); if (S.undo.length > 50) S.undo.shift(); }
   function undo() { const s = S.undo.pop(); if (!s) return toast('Nada para desfazer.'); project.lines = JSON.parse(s); save(); renderPanel(); drawTL(); }
-  function edited() { project.timed = true; approxBanner.hidden = true; sortLines(); save(); drawTL(); }
-  function startTap() {
+  const persistDefault = debounce(async () => {
+    const lines = project.lines.map(({ id, s, e, c, t, o }) => ({ id, s, e, c, t, o }));
+    if (sc.custom) { const scene = await db.get('scenes', project.sceneId); if (scene) { scene.lines = lines; scene.timed = true; await db.put('scenes', scene); } }
+    else await kv.set('timing:' + project.sceneId, lines);
+  }, 800);
+  function edited() { project.timed = true; approxBanner.hidden = project.lines.length > 0; sortLines(); save(); drawTL(); persistDefault(); }
+  function startTap(create) {
     sortLines();
-    if (!project.lines.length) return toast('Adicione falas primeiro.');
+    if (!project.lines.length) create = true;
     pushUndo();
+    if (create) {
+      S.tap = { create: true, down: false, count: 0, char: S.tapChar || '' };
+      approxBanner.hidden = true; panel.scrollTop = 0;
+      S.tab = 'editor'; $$('.tab', tabBar).forEach(b => b.classList.toggle('on', b.dataset.tab === 'editor'));
+      renderPanel();
+      play(S.cursor >= project.duration - 0.5 ? 0 : S.cursor, { onEnd: () => endTap() });
+      return;
+    }
     const startIdx = Math.max(0, project.lines.findIndex(l => l.id === S.selLine));
     const from = Math.max(0, project.lines[startIdx].s - 2);
     S.tap = { idx: startIdx, down: false };
     renderPanel();
     play(from, { onEnd: () => endTap() });
   }
-  function endTap() { if (!S.tap) return; S.tap = null; edited(); stop(); renderPanel(); toast('Tempos marcados ✓', 'ok'); }
+  function endTap() {
+    if (!S.tap) return;
+    const created = S.tap.create ? S.tap.count : 0;
+    S.tap = null; edited(); stop(); renderPanel();
+    toast(created ? `${created} falas marcadas ✓ Agora digite o texto de cada uma.` : 'Tempos marcados ✓', 'ok');
+    if (created) { const first = project.lines.find(l => !l.t); if (first) { S.selLine = first.id; renderPanel(); setTimeout(() => $('.line.sel textarea', panel)?.focus(), 100); } }
+  }
   function tapDown(e) {
     e.preventDefault();
     if (!S.tap || !S.playing) return;
-    const l = project.lines[S.tap.idx]; if (!l) return;
+    if (!S.tap.create && !project.lines[S.tap.idx]) return;
     S.tap.down = true; S.tap.t0 = S.player.time();
     e.currentTarget.classList.add('down');
   }
@@ -776,8 +827,14 @@ export async function openStudio(root, projectId, { onExit }) {
     e.preventDefault();
     if (!S.tap || !S.tap.down) return;
     S.tap.down = false; e.currentTarget.classList.remove('down');
-    const l = project.lines[S.tap.idx];
     const t1 = S.player.time();
+    if (S.tap.create) {
+      const nl = { id: uid('ln_'), s: +S.tap.t0.toFixed(2), e: +Math.max(S.tap.t0 + 0.3, t1).toFixed(2), c: S.tap.char || '', t: '' };
+      project.lines.push(nl); S.tap.count++; sortLines(); drawTL(); save();
+      const cnt = $('.tap-count', panel); if (cnt) cnt.textContent = `${S.tap.count} falas marcadas`;
+      return;
+    }
+    const l = project.lines[S.tap.idx];
     l.s = +S.tap.t0.toFixed(2); l.e = +Math.max(S.tap.t0 + 0.3, t1).toFixed(2);
     // empurra as seguintes se houver sobreposição
     S.tap.idx++;
@@ -787,6 +844,17 @@ export async function openStudio(root, projectId, { onExit }) {
   }
   function pEditor() {
     sortLines();
+    if (S.tap && S.tap.create) {
+      const cs = chars();
+      return h('div', { class: 'tap-mode' },
+        h('p', { class: 'small' }, h('b', {}, 'Marcando falas: '), 'SEGURE o botão enquanto alguém fala. Soltou = fim da fala.'),
+        h('button', { class: 'tapbtn', onpointerdown: tapDown, onpointerup: tapUp, onpointerleave: tapUp, oncontextmenu: e => e.preventDefault() }, 'SEGURE enquanto alguém fala'),
+        h('p', { class: 'tap-count' }, `${S.tap.count} falas marcadas`),
+        h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: endTap }, 'Concluir'), h('button', { class: 'btn ghost', onclick: () => { S.tap = null; stop(); undo(); } }, 'Cancelar')),
+        h('div', { class: 'field' }, h('label', {}, 'Quem está falando (opcional)'),
+          h('input', { value: S.tap.char, placeholder: 'Nome do personagem', oninput: e => { S.tap.char = S.tapChar = e.target.value.trim(); } }),
+          cs.length ? h('div', { class: 'chips' }, cs.map(c => h('button', { class: 'chip', onclick: e => { S.tap.char = S.tapChar = c; e.target.closest('.field').querySelector('input').value = c; } }, c))) : null));
+    }
     if (S.tap) {
       const l = project.lines[S.tap.idx];
       return h('div', { class: 'tap-mode' },
@@ -849,13 +917,14 @@ export async function openStudio(root, projectId, { onExit }) {
     };
     return h('div', {},
       h('div', { class: 'row wrap' },
-        h('button', { class: 'btn primary', onclick: startTap }, '👆 Marcar no ritmo'),
+        h('button', { class: 'btn primary', onclick: () => startTap(true) }, project.lines.length ? '➕ Marcar mais falas' : '➕ Marcar as falas do vídeo'),
+        project.lines.length ? h('button', { class: 'btn', onclick: () => startTap(false) }, '👆 Reajustar tempos no ritmo') : null,
         h('button', { class: 'btn', onclick: () => addLine(null) }, '+ Fala no cursor'),
         h('button', { class: 'btn', onclick: undo }, '↶ Desfazer'),
         h('button', { class: 'btn', onclick: () => fileIn.click() }, 'Importar .srt/.vtt'),
         h('button', { class: 'btn', onclick: () => downloadBlob(new Blob([toSRT(project.lines)], { type: 'application/x-subrip' }), slug(project.name) + '.srt') }, 'Exportar .srt'),
         h('button', { class: 'btn', onclick: saveDefault }, '💾 Salvar como padrão da cena'), fileIn),
-      h('p', { class: 'muted small' }, 'Na régua: arraste as bordas brancas de uma fala para mudar início/fim, ou o meio para mover. “Marcar no ritmo” começa na fala selecionada.'),
+      h('p', { class: 'muted small' }, project.lines.length ? 'Tudo que você marca aqui fica salvo para esta cena. Na régua: arraste as bordas brancas de uma fala para mudar início/fim, ou o meio para mover.' : 'Esta cena ainda não tem falas. Toque em “Marcar as falas do vídeo”, assista e segure o botão enquanto alguém fala. Depois é só digitar o texto de cada fala.'),
       h('ol', { class: 'lines edit' }, project.lines.map((l, i) => h('li', { class: 'line' + (l.id === S.selLine ? ' sel' : ''), onclick: () => { if (S.selLine !== l.id) selectLine(l.id, true); } },
         h('div', { class: 'line-head' }, h('span', { class: 'num' }, i + 1), h('span', { class: 'time' }, lineLabel(l)),
           h('button', { class: 'btn xs', onclick: e => { e.stopPropagation(); playLine(l.id); } }, '▶')),
@@ -863,7 +932,7 @@ export async function openStudio(root, projectId, { onExit }) {
           h('label', {}, 'Início'), num(l, 's'),
           h('label', {}, 'Fim'), num(l, 'e'),
           h('label', {}, 'Personagem'), h('input', { value: l.c || '', placeholder: 'Nome', onchange: e => { l.c = e.target.value.trim(); edited(); renderPanel(); } }),
-          h('label', {}, 'Fala'), h('textarea', { rows: 2, value: l.t, onchange: e => { l.t = e.target.value.trim() || '...'; edited(); } }),
+          h('label', {}, 'Fala'), h('textarea', { rows: 2, value: l.t, placeholder: 'Digite exatamente o que é falado no vídeo', onchange: e => { l.t = e.target.value.trim(); edited(); } }),
           h('label', {}, 'Original'), h('input', { value: l.o || '', placeholder: '(opcional)', onchange: e => { l.o = e.target.value.trim(); edited(); } })),
         h('div', { class: 'row wrap', onclick: e => e.stopPropagation() },
           h('button', { class: 'btn xs', onclick: () => addLine(l) }, '+ depois'),
@@ -917,7 +986,7 @@ export async function openStudio(root, projectId, { onExit }) {
       const blob = await db.get('blobs', sc.blobKey);
       if (!blob) throw new Error('O vídeo desta cena não está mais salvo neste aparelho. Importe o vídeo de novo.');
       S.player = new LocalPlayer(playerBox, { blob });
-      decodeBlob(blob).then(b => { assets.original = b; drawTL(); }).catch(() => { S.player.useElementAudio = true; applyMixLive(); });
+      decodeBlob(blob).then(async b => { assets.origRaw = b; assets.original = project.removeVoice ? await removeVoice(b) : b; drawTL(); }).catch(() => { S.player.useElementAudio = true; applyMixLive(); });
     }
     await S.player.ready();
     msgEl.classList.remove('show');
@@ -935,7 +1004,7 @@ export async function openStudio(root, projectId, { onExit }) {
     if (!project.duration) project.duration = 30;
   }
   S.player?.on(st => onPlayerState(st));
-  approxBanner.hidden = !(project.approx && !project.timed);
+  approxBanner.hidden = project.lines.length > 0;
   applyMixLive();
 
   // carregar takes
@@ -943,7 +1012,7 @@ export async function openStudio(root, projectId, { onExit }) {
   if (project.music && project.music !== 'none') assets.music = await musicBuffer(project.music, project.duration);
   for (const ev of project.sfx) assets.sfx.set(ev.key, await sfxBuffer(ev.key));
   setZoom(null);
-  setTab('roteiro');
+  setTab(project.lines.length ? 'roteiro' : 'editor');
   loop();
   bigPlay.classList.add('show');
 

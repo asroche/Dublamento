@@ -535,3 +535,52 @@ export function peaks(buf, n) {
   for (let i = 0; i < n; i++) { let m = 0; const s = i * step; for (let j = 0; j < step; j += 4) { const a = Math.abs(d[s + j] || 0); if (a > m) m = a; } out[i] = m; }
   return out;
 }
+
+/* ---------------- Nota do take ---------------- */
+// Avalia se a voz ocupou a janela da fala: presença de voz, início no tempo e fim no tempo.
+export function scoreTake(buf) {
+  const d = buf.getChannelData(0), sr = buf.sampleRate;
+  const fl = Math.round(sr * 0.02), n = Math.floor(d.length / fl);
+  if (n < 3) return 0;
+  const rms = new Float32Array(n); let mx = 0;
+  for (let i = 0; i < n; i++) { let s = 0; for (let j = 0; j < fl; j++) { const v = d[i * fl + j]; s += v * v; } rms[i] = Math.sqrt(s / fl); if (rms[i] > mx) mx = rms[i]; }
+  if (mx < 0.01) return 0;
+  const th = Math.max(0.012, mx * 0.15);
+  let act = 0, first = -1, last = -1;
+  for (let i = 0; i < n; i++) if (rms[i] > th) { act++; if (first < 0) first = i; last = i; }
+  const dur = n * 0.02, on = first * 0.02, gap = dur - (last + 1) * 0.02;
+  const sVoice = Math.min(1, act / n / 0.35);
+  const sStart = on <= 0.35 ? 1 : Math.max(0, 1 - (on - 0.35) / 1.0);
+  const sEnd = gap <= 0.5 ? 1 : Math.max(0, 1 - (gap - 0.5) / 1.5);
+  return Math.round(100 * (0.5 * sVoice + 0.25 * sStart + 0.25 * sEnd));
+}
+
+/* ---------------- Remover voz do áudio original (aproximado) ---------------- */
+// Cancela o "centro" estéreo (onde normalmente fica a voz) e mantém graves, agudos e laterais (música/efeitos).
+export async function removeVoice(buffer) {
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const sr = buffer.sampleRate;
+  const oc = new OAC(2, buffer.length, sr);
+  const src = oc.createBufferSource(); src.buffer = buffer;
+  const L = oc.createGain(), R = oc.createGain();
+  if (buffer.numberOfChannels > 1) { const sp = oc.createChannelSplitter(2); src.connect(sp); sp.connect(L, 0); sp.connect(R, 1); }
+  else { src.connect(L); src.connect(R); }
+  const mid = oc.createGain(); mid.gain.value = 0.5; L.connect(mid); R.connect(mid);
+  const side = oc.createGain(); side.gain.value = 0.5; L.connect(side); const inv = oc.createGain(); inv.gain.value = -0.5; R.connect(inv);
+  const sideSum = oc.createGain(); side.connect(sideSum); inv.connect(sideSum);
+  const lp = oc.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 160; mid.connect(lp);
+  const hp = oc.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 7000; const hpg = oc.createGain(); hpg.gain.value = 0.6; mid.connect(hp); hp.connect(hpg);
+  // banda de voz do centro atenuada fortemente
+  const bs1 = oc.createBiquadFilter(); bs1.type = 'peaking'; bs1.frequency.value = 1000; bs1.Q.value = 0.5; bs1.gain.value = -30;
+  const midRest = oc.createGain(); midRest.gain.value = 0.15; mid.connect(bs1); bs1.connect(midRest);
+  const merger = oc.createChannelMerger(2);
+  const outL = oc.createGain(), outR = oc.createGain();
+  [lp, hpg, midRest].forEach(n => { n.connect(outL); n.connect(outR); });
+  sideSum.connect(outL); const sInv = oc.createGain(); sInv.gain.value = -1; sideSum.connect(sInv); sInv.connect(outR);
+  outL.connect(merger, 0, 0); outR.connect(merger, 0, 1);
+  const boost = oc.createGain(); boost.gain.value = 1.4; merger.connect(boost); boost.connect(oc.destination);
+  src.start();
+  const out = await oc.startRendering();
+  normalizePeak(out, 0.95);
+  return out;
+}
